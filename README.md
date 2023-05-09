@@ -1,2 +1,8 @@
-# dna_prediction_perinatal
-Shareable code about predicting the patients who will DNA (did not attend) their appointments and producing the outputs for monitoring
+# Did Not Attend Predictions for Perinatal Mental Health Services
+
+Code being shared for the NHS-R Conference
+
+There are 3 code files and 2 output files
+
+grouping_variable.R
+Using nottshcData, a package created for our team to extract simply from the SQL warehouse. Variables from the different tables we want to gorup to produce a more manageable list with enough occurances of each to be able to do stats on
