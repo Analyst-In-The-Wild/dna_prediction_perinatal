@@ -1,0 +1,520 @@
+---
+title: "Perinatal DNA"
+author: "Lori Edwards Suarez - Principal MH Transformation Analyst"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, 
+                      message=FALSE, 
+                      warning=FALSE, 
+                      error=FALSE, 
+                      # cache = TRUE,
+                      fig.height= 7)
+
+library(nottshcData)
+library(tidyverse)
+
+start_time <- Sys.time()
+#loading the code file which groups certain variables without needing to pull all data in
+source(here::here("grouping_variable.R"))
+
+#tells us the job of hcp and also lead or not
+hcp_job <- get_rio_hcp_details() %>% 
+    tidy_rio_hcp_details()
+
+#loading in the contacts table for the period in question just Seen and DNA as cancelled are not part of this
+contacts <- get_rio_contacts(select_vars = FALSE) %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code %in% teams) %>%
+    filter(contacts_contact_datetime > start_date) %>% 
+    filter(contacts_contact_datetime < end_date) %>% 
+    filter(contact_status == "Seen" |
+               contact_status == "DNA") %>% 
+    left_join(hcp_job) %>% 
+    filter(lead_hcp_yes_no == "Yes") %>% 
+    distinct(client_id,
+             referral_id,
+             team_desc,
+             contacts_contact_datetime,
+             contact_status,
+             appt_type_desc,
+             location_desc,
+             lead_hcp_yes_no,
+             hcp_desc) %>%
+    collect() %>% 
+    #join all the categorical groupings from previous R file loaded
+    left_join(hcp_role) %>% 
+    left_join(appt_attendance) %>% 
+    left_join(appt_method) %>% 
+    left_join(appt_location) %>% 
+    filter(appt_attendance != "EXCLUDE") %>% 
+    #adjusting the appointment location for face to face places and virtual
+    mutate(appt_location = case_when(appt_method == "Face to Face" ~ appt_location,
+                                     TRUE ~ "Virtual"),
+           appt_hour = lubridate::hour(contacts_contact_datetime),
+           appt_day = lubridate::wday(contacts_contact_datetime)) %>% 
+    #exclude the DQ issues of out of hours working
+    filter(appt_day != "7")  %>% 
+    filter(appt_hour > 8)  %>% 
+    filter(appt_hour < 17) %>% 
+    mutate(appt_day = case_when(appt_day == 2 ~ "Monday",
+                                appt_day == 3 ~ "Tuesday",
+                                appt_day == 4 ~ "Wednesday",
+                                appt_day == 5 ~ "Thursday",
+                                appt_day == 6 ~ "Friday",
+                                TRUE ~ "ERROR"),
+           appt_time = case_when(appt_hour <= 11 ~ "Morning",
+                                 appt_hour >= 15 ~ "Afternoon",
+                                 TRUE ~ "Lunch"))
+
+#counting the number of contacts people had had every in their referrals for the counting in follow up
+contact_count <- get_rio_contacts(select_vars = FALSE) %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code %in% teams) %>% 
+    filter(contacts_contact_datetime < end_date) %>% 
+    left_join(hcp_job) %>% 
+    filter(lead_hcp_yes_no == "Yes") %>% 
+    filter(contact_status == "Seen" |
+               contact_status == "DNA") %>% 
+    select(client_id,
+           referral_id,
+           contact_status,
+           contacts_contact_datetime) %>% 
+    distinct() %>% 
+    collect() %>% 
+    arrange(contacts_contact_datetime) %>% 
+    group_by(client_id, referral_id, contact_status) %>% 
+    mutate(count = row_number()) %>% 
+    ungroup() %>% 
+    pivot_wider(id_cols = c(client_id, referral_id, contacts_contact_datetime),
+                names_from = contact_status,
+                values_from = count) %>% 
+    group_by(client_id, referral_id) %>% 
+    fill(Seen, .direction = "down") %>% 
+    fill(DNA, .direction = "down") %>% 
+    mutate(Seen = replace_na(Seen, 0),
+           DNA = replace_na(DNA, 0))
+
+#find the date/time of the first time they were seen by the team to determine intial/follow up flag
+initial <- get_rio_contacts(select_vars = FALSE) %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code %in% teams) %>% 
+    filter(contacts_contact_datetime < end_date) %>% 
+    left_join(hcp_job) %>% 
+    filter(lead_hcp_yes_no == "Yes") %>% 
+    filter(contact_status == "Seen") %>% 
+    select(client_id,
+           referral_id,
+           initial_contact = contacts_contact_datetime) %>% 
+    distinct() %>% 
+    collect()  %>% 
+    arrange(initial_contact) %>% 
+    distinct(client_id, referral_id, .keep_all = TRUE)
+
+perinatal_pats <- contacts %>% 
+    distinct(client_id) %>% 
+    pull()
+
+#data taht is not in report_base
+source(here::here("fact_data.R"))
+
+#deriving the first booked contact a patient has
+booked_contact <- get_rio_contacts(select_vars = TRUE) %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code %in% teams) %>%
+    # filter(client_id %in% perinatal_pats) %>% 
+    select(client_id,
+           referral_id,
+           team_desc,
+           contacts_referral_datetime,
+           contacts_contact_datetime,
+           contact_status) %>%
+    arrange(contacts_contact_datetime) %>% 
+    distinct(client_id, referral_id, .keep_all = TRUE) %>% 
+    collect() %>% 
+    mutate(tt_booked = round(difftime(contacts_contact_datetime,
+                                      contacts_referral_datetime,
+                                      units = "days"))) %>% 
+    select(client_id,
+           referral_id,
+           tt_booked)
+
+#time to first seen contact
+seen_contact <- get_rio_contacts(select_vars = TRUE) %>% 
+    tidy_rio_contacts() %>% 
+    filter(contact_status == "Seen") %>% 
+    filter(team_code %in% teams) %>%
+    select(client_id,
+           referral_id,
+           team_desc,
+           contacts_referral_datetime,
+           contacts_contact_datetime,
+           contact_status) %>%
+    arrange(contacts_contact_datetime) %>% 
+    distinct(client_id, referral_id, .keep_all = TRUE) %>% 
+    collect() %>% 
+    mutate(tt_seen = round(difftime(contacts_contact_datetime,
+                                    contacts_referral_datetime,
+                                    units = "days"))) %>% 
+    select(client_id,
+           referral_id,
+           tt_seen)
+
+#collecting the contacts data together to derive the intiail/follow up and timing to booked and seen contact
+contacts <- contacts %>% 
+    left_join(booked_contact) %>% 
+    left_join(seen_contact) %>% 
+    left_join(contact_count) %>% 
+    left_join(initial) %>% 
+    mutate(initial_fu = case_when(contacts_contact_datetime > initial_contact ~ "Follow Up",
+                                  TRUE ~ "Initial"))
+
+#extract pcn information and GP
+pcn <- get_pcn() %>% 
+    tidy_pcn() %>% 
+    select(gp_practice_code,
+           gp_practice_name,
+           pcn_name) %>% 
+    collect()
+
+#extract demographic information for patients and join pcn information
+demos <- get_rio_px_demographics() %>% 
+    filter(client_id %in% perinatal_pats) %>% 
+    # left_join(pcn, by = c("gp_practice_desc" = "gp_practice_name")) %>% 
+    select(client_id,
+           date_of_birth,
+           ethnicity_category,
+           first_language_desc,
+           gp_practice_code,
+           lsoa_2011_code,
+           la_district_2019_name,
+           notts_imd_decile,
+    ) %>%
+    collect()  %>% 
+    mutate(ethnicity_category = case_when(str_detect(ethnicity_category, "^Not") ~ "Unknown",
+                                          TRUE ~ ethnicity_category),
+           gp_practice_code = str_trunc(gp_practice_code, 6))%>% 
+    left_join(pcn) %>% 
+    mutate(current_pcn = pcn_name) %>% 
+    select(-pcn_name)
+
+#determine the nottinghamshire PCNS
+local_pcns <- demos %>% 
+    filter(!is.na(notts_imd_decile)) %>% 
+    group_by(current_pcn) %>% 
+    count() %>% 
+    ungroup() %>% 
+    filter(n > 100 |
+               str_detect(current_pcn, "NOTT")) %>% 
+    select(pcn = current_pcn) %>% 
+    pull(pcn)
+
+#extract the nottinghamshire localities
+notts_locality <- demos %>% 
+    filter(!is.na(notts_imd_decile)) %>% 
+    pull(la_district_2019_name)
+
+#extract imd information
+imd <- get_imd(select_vars = FALSE) %>% 
+    tidy_imd() %>% 
+    select(lsoa_2011_code,
+           imd_rank,
+           notts_wide_rank,
+           imd_score,
+           eng_imd_decile,
+           notts_imd_decile,
+           income_scorerate,
+           employment_scorerate,
+           education_skillsand_training_score,
+           health_deprivationand_disability_score,
+           crime_score,
+           barriersto_housingand_services_score,
+           living_environment_score,
+           income_deprivation_affecting_children_index_idaci_scorerate,
+           childrenand_young_people_subdomain_score,
+           adult_skills_subdomain_score,
+           geographical_barriers_subdomain_score,
+           wider_barriers_subdomain_score,
+           indoors_subdomain_score,
+           outdoors_subdomain_score,
+           dependent_childrenaged015mid2015excludingprisoners) %>% 
+    collect()
+
+#get the referral information for the patient in question and joining to grouped data such as referrer and demographics
+#correcting missing data frmo NA to not known
+referrals <- get_rio_referrals() %>% 
+    tidy_rio_referrals() %>% 
+    filter(referrals_discharge_datetime > end_date |
+               is.na(referrals_discharge_datetime)) %>% 
+    filter(team_code %in% teams) %>% 
+    collect() %>% 
+    left_join(pcn, by = c("gp_practice_at_referral" = "gp_practice_code")) %>% 
+    select(client_id,
+           referral_id,
+           team_desc,
+           referrals_referral_datetime,
+           referrals_firstappt_datetime,
+           referral_reason_desc,
+           referral_source_desc,
+           referral_pcn = pcn_name,
+    ) %>%
+    left_join(demos) %>% 
+    left_join(referrer) %>% 
+    left_join(imd) %>% 
+    left_join(db_acc) %>% 
+    filter(!is.na(date_of_birth)) %>% 
+    mutate(referral_reason = case_when(str_detect(referral_reason_desc, "Pregnant") ~ "Pregnant",
+                                       str_detect(referral_reason_desc, "Post") ~ "Postpartum",
+                                       TRUE ~ "Other"
+    ),
+    first_language_desc = case_when(is.na(first_language_desc) ~ "English",
+                                    str_detect(first_language_desc, "English") ~ "English",
+                                    TRUE ~ "Not English"),
+    age_at_referral = eeptools::age_calc(dob = as.Date(date_of_birth), as.Date(referrals_referral_datetime), units = "years", precise = FALSE),
+    known_to_trust = case_when(as.numeric(referral_id) == 1 ~ "No",
+                               TRUE ~ "Yes"),
+    current_pcn = case_when(current_pcn %in% local_pcns ~ current_pcn,
+                            TRUE ~ "NOT NOTTS PCN"),
+    referral_pcn = case_when(referral_pcn %in% local_pcns ~ referral_pcn,
+                             TRUE ~ "NOT NOTTS PCN"),
+    la_district_2019_name = case_when(is.na(notts_imd_decile) ~ "Not Nottingham",
+                                      TRUE ~ la_district_2019_name),
+    autism = case_when(is.na(autism) ~ "No/Not Declared",
+                       TRUE ~ autism),
+    idd = case_when(is.na(idd) ~ "No/Not Declared",
+                    TRUE ~ idd),
+    physical = case_when(is.na(physical) ~ "No/Not Declared",
+                         TRUE ~ physical),
+    grouped_accom = case_when(is.na(grouped_accom) ~ "Unknown",
+                              TRUE ~ grouped_accom),
+    employ_grouped = case_when(is.na(employ_grouped) ~ "Unknown",
+                               TRUE ~ employ_grouped),
+    smoking = case_when(is.na(smoking) ~ "Unknown",
+                        TRUE ~ smoking)) %>% 
+    distinct()
+
+#calculkate who has met perinatal multiple times
+re_referral <-  get_rio_referrals() %>% 
+    tidy_rio_referrals() %>% 
+    filter(team_code %in% teams) %>% 
+    select(client_id,
+           referral_id,
+           team_desc
+    ) %>% 
+    collect()%>% 
+    arrange(referral_id) %>% 
+    group_by(client_id, team_desc) %>% 
+    count() %>% 
+    ungroup() %>% 
+    filter(n > 1) %>% 
+    pull(client_id)
+
+#extract information from the first ever perinatal ref for those who have been seen multiple times
+first_ref <- get_rio_referrals() %>% 
+    tidy_rio_referrals() %>% 
+    filter(client_id %in% re_referral) %>% 
+    filter(team_code %in% teams) %>% 
+    select(client_id,
+           first_referral_id = referral_id,
+           team_desc
+    ) %>% 
+    collect() %>% 
+    arrange(first_referral_id) %>% 
+    distinct(client_id, team_desc, .keep_all = TRUE)
+
+#addressing if the patient is known to the trust or to perinatal or neither
+data_set <- referrals %>% 
+    left_join(first_ref) %>% 
+    mutate(re_ref = case_when(is.na(first_referral_id) ~ "First Ref",
+                              first_referral_id == referral_id ~ "First Ref",
+                              TRUE ~ "Re Referral"),
+           known_to_trust = case_when(known_to_trust == "No" ~ "Not Known",
+                                      re_ref == "Re Referral" ~ "Known To Perinatal",
+                                      TRUE ~ "Known Trust")) %>% 
+    inner_join(contacts) %>% 
+    distinct()
+
+end_time <- Sys.time()
+
+timetaken <- end_time - start_time
+
+timetaken
+
+```
+
+## Perinatal Logistic Regression
+
+```{r}
+#initial dataset extraction
+initial_data_set <- data_set %>% 
+    filter(initial_fu == "Initial") %>% 
+
+    filter(!is.na(income_scorerate)) %>% 
+    select(client_id,
+           referral_id,
+           contact_status,
+           team_desc,
+           referrer,
+           referral_reason,
+           referral_pcn,
+           ethnicity_category,
+           first_language_desc,
+           la_district_2019_name,
+           imd_score,
+           eng_imd_decile,
+           income_scorerate:dependent_childrenaged015mid2015excludingprisoners,
+           grouped_accom,
+           employ_grouped,
+           autism,
+           idd,
+           physical,
+           smoking,
+           age_at_referral,
+           known_to_trust,
+           hcp_role,
+           appt_hour,
+           appt_day,
+           appt_time,
+           appt_method,
+           appt_location,
+           appt_attendance,
+           tt_booked
+    ) %>% 
+    #condensed hcp role due to tiny numbers
+    mutate(tt_booked = as.numeric(tt_booked),
+           hcp_role = case_when(hcp_role == "Medic" ~ "Medic",
+                                hcp_role == "Nurse" ~ "Nurse",
+                                TRUE ~ "Other"),
+           ethnicity_category = case_when(ethnicity_category == "White" ~ "White",
+                                          TRUE ~ "Other Ethnicity"))
+
+glimpse(initial_data_set)
+
+#helps identify where any true NAs are hiding
+names(which(colSums(is.na(initial_data_set))>0))
+```
+
+```{r}
+#building the model
+initial_model <- initial_data_set %>%
+    mutate(contact_status = case_when(
+        contact_status == "Seen" ~ 0,
+        contact_status =="DNA" ~ 1
+    ),
+    referral_pcn = case_when(is.na(referral_pcn) ~ "NOT NOTTS PCN",
+                             TRUE ~ referral_pcn)) %>%
+    filter(referrer != "Other") %>% 
+    glm(contact_status ~
+            # team_desc
+        referrer
+        # + imd_score
+        # + referral_reason
+        # + referral_pcn
+        + ethnicity_category
+        # + first_language_desc
+        + la_district_2019_name
+        + eng_imd_decile
+        # + income_scorerate
+        # + employment_scorerate
+        + education_skillsand_training_score
+        + health_deprivationand_disability_score
+        # + crime_score
+        + barriersto_housingand_services_score
+        + living_environment_score
+        # +  income_deprivation_affecting_children_index_idaci_scorerate
+        # + childrenand_young_people_subdomain_score
+        # + adult_skills_subdomain_score
+        # + geographical_barriers_subdomain_score
+        # + wider_barriers_subdomain_score
+        # + indoors_subdomain_score
+        # + outdoors_subdomain_score
+        # + dependent_childrenaged015mid2015excludingprisoners
+        # + grouped_accom
+        # + employ_grouped
+        # + autism
+        # + idd
+        # + physical
+        # + smoking
+        + age_at_referral
+        + known_to_trust
+        + hcp_role
+        # + appt_time
+        + appt_day
+        # + appt_method
+        + appt_location
+        + tt_booked,
+        data = ., family=binomial(link='logit'))
+#creating a more readbale output
+
+initial_model %>%
+    broom::tidy() %>% 
+    mutate(exp_est = round(exp(estimate), digits = 2),
+           sig = case_when(`p.value` < 0.001 ~ "***",
+                           `p.value` < 0.01 ~ "**",
+                           `p.value` < 0.05 ~ "*",
+                           `p.value` < 0.1 ~ ".",
+                           TRUE ~ "")) %>% 
+    select(term,
+           relationship_effect = exp_est,
+           sig) %>% 
+    mutate(variable = case_when(str_detect(term, "referrer") ~ "Referrer - GP",
+                                str_detect(term, "la_district_2019_name") ~ "Locality - Ashfield",
+                                str_detect(term, "eth") ~ "Ethnicity - Other Ethnicity",
+                                str_detect(term, "known_to_trust") ~ "MH History - Known to Perinatal",
+                                str_detect(term, "hcp_role") ~ "HCP Role - Medic",
+                                str_detect(term, "appt_day") ~ "Appointment Day - Friday",
+                                str_detect(term, "appt_location") ~ "Appointment Location - Community Location",
+                                str_detect(term, "employment") ~ "Employment IMD",
+                                str_detect(term, "education") ~ "Education & Skills IMD",
+                                str_detect(term, "health") ~ "Health & Disability IMD",
+                                str_detect(term, "housing") ~ "Housing Barriers IMD",
+                                str_detect(term, "living") ~ "Liviing Environment IMD",
+                                str_detect(term, "income") ~ "Child Poverty Risk IMD",
+                                str_detect(term, "age") ~ "Age at Referral",
+                                str_detect(term, "booked") ~ "Time to First Booked Appt",
+                                str_detect(term, "decile") ~ "IMD Decile",
+                                !str_detect(term, "Intercept") ~ term,
+                                TRUE ~ "Intercept")) %>% 
+    mutate(categories = case_when(!str_detect(variable, " - ") ~ "Continuous Variable",
+                                  str_detect(variable, "Locality") ~ str_replace_all(term, "la_district_2019_name", ""),
+                                  str_detect(variable, "Referrer") ~ str_replace_all(term, "referrer", ""),
+                                  str_detect(variable, "Ethnicity") ~ str_replace_all(term, "ethnicity_category", ""),
+                                  str_detect(variable, "MH History") ~ str_replace_all(term, "known_to_trust", ""),
+                                  str_detect(variable, "Appointment Day") ~ str_replace_all(term, "appt_day", ""),
+                                  str_detect(variable, "Appointment Location") ~ str_replace_all(term, "appt_location", ""),
+                                  str_detect(variable, "HCP Role") ~ str_replace_all(term, "hcp_role", ""),
+                                  # str_detect(variable, "Autism") ~ str_replace_all(term, "autism_status", ""),
+                                  # str_detect(variable, "IDD") ~ str_replace_all(term, "idd_status", ""),
+                                  # str_detect(variable, "Gender") ~ str_replace_all(term, "gender_mpi_desc", ""),
+                                  # str_detect(variable, "LMHT") ~ str_replace_all(term, "district", ""),
+                                  # str_detect(variable, "Crisis") ~ str_replace_all(term, "crisis_status", ""),
+                                  # str_detect(variable, "Community") ~ str_replace_all(term, "community_status", ""),
+                                  # str_detect(variable, "Legal") ~ str_replace_all(term, "initial_section", ""),
+                                  # str_detect(variable, "Previous") ~ str_replace_all(term, "previous_admit", ""),
+                                  TRUE ~ term)) %>% 
+    filter(variable != "Intercept") %>%
+    select(-term) %>% 
+    # select(variable, categories, relationship_effect, sig) %>% 
+    group_by(variable) %>% 
+    gt::gt() %>% 
+    gt::cols_label(
+        categories = "Variable Categories",
+        relationship_effect = "% Different from Baseline",
+        sig = "Signficance Rating"
+    ) %>% 
+    gt::cols_align(
+        align = "right"
+    ) %>% 
+    gt::tab_header(
+        title = "Variable in Regression Modelling",
+        subtitle = "For Categorical Variables, the one named in the sub heading is the comparison"
+    ) %>% 
+    gt::tab_options(
+        row_group.background.color = "PaleTurquoise",
+        row_group.font.weight = "Bold"
+    )
+
+sjPlot::plot_model(initial_model)
+```

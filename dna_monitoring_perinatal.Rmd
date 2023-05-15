@@ -1,0 +1,321 @@
+---
+title: "Perinatal DNAs Monitoring"
+author: "Lori Edwards Suarez - Principal MH Transformation Analyst"
+date: "`r Sys.Date()`"
+output: html_document
+---
+<!-- Data Last Refreshed: "`r nottshcData::get_rio_refresh(output='string')`" -->
+
+# {.tabset .tabset-pills}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, 
+                      message=FALSE, 
+                      warning=FALSE, 
+                      error=FALSE, 
+                      # cache = TRUE,
+                      fig.height= 7)
+
+library(nottshcData)
+library(tidyverse)
+library(DT)
+# library(sjlabelled)
+# library(sjPlot)
+# library(sjmisc)
+
+conn_sql_rio <- connect_sql(database = "BI_DW_Rio")
+
+#tells us the job of hcp and also lead or not
+hcp_job <- get_rio_hcp_details() %>% 
+    tidy_rio_hcp_details()
+
+
+#loading the code file which groups certain variables without needing to pull all data in
+source(here::here("grouping_variable.R"))
+
+#loading in the contacts table for the period in question just Seen and DNA as cancelled are not part of this
+contacts <- get_rio_contacts(select_vars = FALSE) %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code == "team_code") %>%
+    filter(contacts_contact_datetime > start_date) %>% 
+    filter(contact_status == "Seen" |
+               contact_status == "DNA") %>% 
+    left_join(hcp_job) %>% 
+    filter(lead_hcp_yes_no == "Yes") %>% 
+    distinct(client_id,
+             referral_id,
+             team_desc,
+             contacts_contact_datetime,
+             contact_status) %>%
+    collect() %>% 
+    filter(!is.na(contacts_contact_datetime)) %>% 
+    mutate(contact_month = lubridate::floor_date(contacts_contact_datetime, unit = "month"))
+
+#find the date/time of the first time they were seen by the team to determine intial/follow up flag
+initial <- get_rio_contacts(select_vars = FALSE) %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code == "team_code") %>%
+    left_join(hcp_job) %>% 
+    filter(lead_hcp_yes_no == "Yes") %>% 
+    filter(contact_status == "Seen") %>% 
+    select(client_id,
+           referral_id,
+           initial_contact = contacts_contact_datetime) %>% 
+    distinct() %>% 
+    collect()   %>% 
+    arrange(initial_contact) %>% 
+    distinct(client_id, referral_id, .keep_all = TRUE)
+
+contact_month <- contacts %>% 
+    left_join(initial) %>% 
+    mutate(initial_fu = case_when(contacts_contact_datetime > initial_contact ~ "Follow Up",
+                                  TRUE ~ "Initial")) %>% 
+    group_by(contact_month, initial_fu, contact_status) %>% 
+    count() %>% 
+    ungroup() %>% 
+    complete(contact_month, initial_fu, contact_status, fill = list(n = 0)) %>% 
+    group_by(contact_month, initial_fu) %>% 
+    mutate(percent = round(n/sum(n), digits = 3)) %>% 
+        ungroup()
+```
+
+## DNA Rate
+
+```{r}
+dna_rate <- contact_month %>% 
+    filter(contact_month > "2021-07-01") %>%
+    ggplot(aes(x = contact_month, y = n))+
+    geom_bar(stat="identity", aes(fill = contact_month, text = paste0("Contact Type: ", initial_fu, "<br>",
+                                                                      "Month: ", contact_month, "<br>",
+                                                                      "Appt Outcome: ", contact_status, "<br>",
+                                                                      "Count: ", n, "%"))) + 
+    ggplot2::scale_fill_viridis_c(option = "plasma", end = 0.75) +
+    ggtitle("Initial/Follow Up DNA & Seen Count") +
+    facet_wrap(initial_fu~contact_status) + 
+    theme(legend.position = "none") 
+
+plotly::ggplotly(dna_rate, tooltip = "text") %>%
+    plotly::config(displayModeBar = FALSE)
+
+contact_month |> 
+    filter(contact_month > "2021-07-01") %>%
+    filter(contact_month < lubridate::floor_date(lubridate::today(), unit = "month")) %>% 
+    qicharts2::qic(contact_month, n, 
+                   data     = .,
+                   chart    = 'c',
+                   title    = 'Seen vs DNA counts, Initial vs Follow Up',
+                   ylab     = 'Appointments',
+                   xlab     = 'Month',
+                   facet    = initial_fu~contact_status)
+
+dna_rate <- contact_month %>% 
+    filter(contact_month > "2021-07-01") %>% 
+    ggplot(aes(x = contact_month, y = percent)) +
+    geom_bar(stat="identity", aes(fill = contact_month, text = paste0("Contact Type: ", initial_fu, "<br>",
+                                                                      "Month: ", contact_month, "<br>",
+                                                                      "Appt Outcome: ", contact_status, "<br>",
+                                                                      "Percent: ", (percent * 100), "%"))) + 
+    ggplot2::scale_fill_viridis_c(option = "plasma", end = 0.75) +
+    ggtitle("Initial/Follow Up DNA & Seen Percentage") +
+    facet_wrap(initial_fu~contact_status) + 
+    scale_y_continuous(labels = scales::percent) +
+    theme(legend.position = "none") 
+
+plotly::ggplotly(dna_rate, tooltip = "text") %>%
+    plotly::config(displayModeBar = FALSE)
+```
+
+## Patient Risk Initial
+
+```{r}
+demos <- get_rio_demographics(exclude_sensitive = FALSE) %>% 
+    tidy_rio_demographics() %>% 
+    select(client_id,
+           forename,
+           surname,
+           date_of_birth,
+           eng_imd_decile,
+           ethnicity_category,
+           la_district_2019_name)
+
+appt_type <- get_rio_contacts() %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code == "team_code") %>% 
+    distinct(appt_type_desc) %>% 
+    collect() %>% 
+    filter(!str_detect(appt_type_desc, "hone")) %>% 
+    pull(appt_type_desc)
+
+status <- get_rio_contacts() %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code == "team_code") %>% 
+    distinct(contact_status) %>% 
+    collect()
+
+next_appt <- get_rio_contacts() %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code == "team_code") %>%  
+    filter(contacts_contact_datetime > "2022-10-01") %>% 
+    arrange(contacts_contact_datetime) %>%
+    select(client_id, referral_id, contacts_contact_datetime, appt_type_desc)
+
+current_pats <- get_rio_referrals() %>% 
+    tidy_rio_referrals() %>% 
+    filter(team_code == "team_code") %>% 
+    filter(is.na(referrals_discharge_datetime)) %>% 
+    filter(is.na(referrals_firstappt_datetime)) %>% 
+    left_join(next_appt) %>% 
+    select(client_id,
+           referrals_referral_datetime, 
+           next_booked_appt = contacts_contact_datetime, 
+           next_booked_type = appt_type_desc) %>%
+    left_join(demos) %>%
+    collect() %>% 
+    arrange(next_booked_appt) %>% 
+    distinct(client_id, referrals_referral_datetime, .keep_all = TRUE) %>% 
+    mutate(patient_name = paste(forename, surname, sep = " "),
+        referral_age  = eeptools::age_calc(as.Date(date_of_birth), as.Date(referrals_referral_datetime), units = "years", precise = FALSE),
+           imd_risk = case_when(eng_imd_decile < 3 ~ 2,
+                                eng_imd_decile < 6 ~ 1,
+                                TRUE ~ 0),
+           ethnicity_risk = case_when(ethnicity_category != "White" ~ 1,
+                                      TRUE ~ 0),
+           age_risk = case_when(referral_age < 24 ~ 2,
+                                referral_age < 30 ~ 1,
+                                TRUE ~ 0),
+           waiting_time = round(difftime(lubridate::today(), referrals_referral_datetime, units = "days"), digits = 0),
+           wait_risk = case_when(waiting_time > 45 ~ 2,
+                                waiting_time > 28 ~ 1,
+                                TRUE ~ 0),
+           risk_sum = imd_risk + ethnicity_risk + age_risk + wait_risk,
+        referrals_referral_datetime = as.Date(referrals_referral_datetime)) 
+
+current_pats_risk <- current_pats %>% 
+    select(RiONumber = client_id,
+           Patient = patient_name,
+           ReferralDate = referrals_referral_datetime,
+           Area = la_district_2019_name,
+           IMDDecile = eng_imd_decile,
+           Ethnicity = ethnicity_category,
+           DaysWaiting = waiting_time,
+           RiskScore = risk_sum 
+           ) %>% 
+    arrange(desc(RiskScore), desc(DaysWaiting))
+                   
+datatable(current_pats_risk, filter = 'top', extensions = 'Buttons',  options = list(
+  pageLength = 10, autoWidth = TRUE, dom = 'Blfrtip', buttons = c('csv', 'pdf'), lengthMenu = c(5, 10, 15, 20, 'all'))
+  ) %>% 
+  formatStyle('RiskScore',
+              target = 'row',
+    backgroundColor = styleEqual(
+      unique(current_pats_risk$RiskScore), c('red', 'red', 'orange', 'orange', 'yellow', 'yellow', 'green', 'green')),
+    Color = styleEqual(
+      unique(current_pats_risk$RiskScore), c('white', 'white', 'black', 'black', 'black', 'black', 'black', 'black'))
+  ) 
+```
+
+## Active Caseload Missing Ethnicity
+
+```{r}
+current_pats_caseload <- get_rio_referrals() %>% 
+    tidy_rio_referrals() %>% 
+    filter(team_code == "team_code") %>% 
+    filter(is.na(referrals_discharge_datetime)) %>% 
+    filter(!is.na(referrals_firstappt_datetime)) %>% 
+    left_join(next_appt) %>% 
+    select(client_id,
+           referrals_referral_datetime, 
+           referrals_firstappt_datetime,
+           next_booked_appt = contacts_contact_datetime, 
+           next_booked_type = appt_type_desc) %>%
+    left_join(demos) %>% 
+    collect() %>% 
+    distinct(client_id, referrals_referral_datetime, .keep_all = TRUE) %>% 
+    mutate(patient_name = paste(forename, surname, sep = " "),
+        referral_age  = eeptools::age_calc(as.Date(date_of_birth), as.Date(referrals_referral_datetime), units = "years", precise = FALSE))
+
+next_appt <- get_rio_contacts() %>% 
+    tidy_rio_contacts() %>% 
+    filter(team_code == "team_code") %>%  
+    filter(contacts_contact_datetime > lubridate::today()) %>% 
+    filter(contact_status == "Unoutcomed") %>% 
+    arrange(contacts_contact_datetime) %>%
+    select(client_id, referral_id, contacts_contact_datetime, hcp_code) %>% 
+    collect() %>% 
+    arrange(contacts_contact_datetime) %>% 
+    distinct(client_id, .keep_all = TRUE) %>% 
+    select(client_id, hcp_code, contacts_contact_datetime)
+
+hcp_names <- readxl::read_excel("lmht_job_matching.xlsx", sheet = 3)
+
+current_pats_na_ethnic <- current_pats_caseload %>% 
+    left_join(next_appt) %>% 
+    left_join(hcp_names) %>% 
+    mutate(referrals_referral_datetime = as.Date(referrals_referral_datetime),
+           referrals_firstappt_datetime = as.Date(referrals_firstappt_datetime),
+           hcp_name = case_when(is.na(hcp_name) ~ hcp_code,
+                                TRUE ~ hcp_name),
+           contacts_contact_datetime = as.Date(contacts_contact_datetime)) %>% 
+    filter(str_detect(ethnicity_category, "^Not")) %>% 
+    select(RiONumber = client_id,
+           Patient = patient_name,
+           NextHCP = hcp_name,
+           NextContact = contacts_contact_datetime,
+           FirstAppt = referrals_firstappt_datetime,
+           Ethnicity = ethnicity_category)
+    
+datatable(current_pats_na_ethnic, filter = 'top', extensions = 'Buttons',  options = list(
+  pageLength = 10, autoWidth = TRUE, dom = 'Blfrtip', buttons = c('csv', 'pdf'), lengthMenu = c(5, 10, 15, 20, 'all'))
+  ) 
+```
+
+## Active Caseload Demographics
+
+```{r}
+current_pats_caseload %>% 
+    group_by(ethnicity_category) %>% 
+    count() %>% 
+    ungroup() %>%  
+    mutate(percent = n/sum(n)) %>% 
+    ggplot(aes(x = ethnicity_category, y = percent)) +
+    geom_bar(stat="identity", aes(fill = ethnicity_category)) + 
+    ggplot2::scale_fill_viridis_d(option = "plasma", end = 0.75) +
+    scale_y_continuous(labels = scales::percent) +
+    ggtitle("Ethnicity Breakdown") +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+```
+ <br>
+```{r}
+current_pats_caseload %>% 
+    ggplot(aes(x = referral_age)) +
+    geom_histogram(fill = 'white', colour = 'blue') + 
+    ggplot2::scale_fill_viridis_d(option = "plasma", end = 0.75) +
+    ggtitle("Patient Referral Age") +
+    labs(x = "Patient Age on Referral") +
+    theme(legend.position = "none") 
+
+```
+<br>
+```{r}
+nottingham_localities <- get_rio_demographics() %>%
+    tidy_rio_demographics() %>% 
+    filter(!is.na(notts_imd_decile)) %>%
+    distinct(la_district_2019_name) %>%
+    collect() %>%
+    pull(la_district_2019_name)
+
+current_pats_caseload %>% 
+    mutate(la_district_2019_name = case_when(la_district_2019_name %in% nottingham_localities ~ la_district_2019_name,
+                                             TRUE ~ "Not Notts")) %>% 
+    group_by(la_district_2019_name) %>% 
+    count() %>% 
+    ungroup()  %>%  
+    ggplot(aes(x = la_district_2019_name, y = n)) +
+    geom_bar(stat="identity", aes(fill = la_district_2019_name)) + 
+    ggplot2::scale_fill_viridis_d(option = "plasma", end = 0.75) +
+    ggtitle("Patient District") +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+```
+
