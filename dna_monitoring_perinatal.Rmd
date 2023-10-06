@@ -36,12 +36,12 @@ source(here::here("grouping_variable.R"))
 #loading in the contacts table for the period in question just Seen and DNA as cancelled are not part of this
 contacts <- get_rio_contacts(select_vars = FALSE) %>% 
     tidy_rio_contacts() %>% 
-    filter(team_code == "team_code") %>%
+    filter(team_code %in% teams) %>%
     filter(contacts_contact_datetime > start_date) %>% 
     filter(contact_status == "Seen" |
                contact_status == "DNA") %>% 
     left_join(hcp_job) %>% 
-    filter(lead_hcp_yes_no == "Yes") %>% 
+    # filter(lead_hcp_yes_no == "Yes") %>% 
     distinct(client_id,
              referral_id,
              team_desc,
@@ -49,12 +49,12 @@ contacts <- get_rio_contacts(select_vars = FALSE) %>%
              contact_status) %>%
     collect() %>% 
     filter(!is.na(contacts_contact_datetime)) %>% 
-    mutate(contact_month = lubridate::floor_date(contacts_contact_datetime, unit = "month"))
+    mutate(contact_month = as.Date(lubridate::floor_date(contacts_contact_datetime, unit = "month")))
 
 #find the date/time of the first time they were seen by the team to determine intial/follow up flag
 initial <- get_rio_contacts(select_vars = FALSE) %>% 
     tidy_rio_contacts() %>% 
-    filter(team_code == "team_code") %>%
+    filter(team_code %in% teams) %>%
     left_join(hcp_job) %>% 
     filter(lead_hcp_yes_no == "Yes") %>% 
     filter(contact_status == "Seen") %>% 
@@ -62,7 +62,7 @@ initial <- get_rio_contacts(select_vars = FALSE) %>%
            referral_id,
            initial_contact = contacts_contact_datetime) %>% 
     distinct() %>% 
-    collect()   %>% 
+    collect() %>% 
     arrange(initial_contact) %>% 
     distinct(client_id, referral_id, .keep_all = TRUE)
 
@@ -140,7 +140,7 @@ demos <- get_rio_demographics(exclude_sensitive = FALSE) %>%
 
 appt_type <- get_rio_contacts() %>% 
     tidy_rio_contacts() %>% 
-    filter(team_code == "team_code") %>% 
+    filter(team_code %in% teams) %>%
     distinct(appt_type_desc) %>% 
     collect() %>% 
     filter(!str_detect(appt_type_desc, "hone")) %>% 
@@ -148,20 +148,20 @@ appt_type <- get_rio_contacts() %>%
 
 status <- get_rio_contacts() %>% 
     tidy_rio_contacts() %>% 
-    filter(team_code == "team_code") %>% 
+    filter(team_code %in% teams) %>%
     distinct(contact_status) %>% 
     collect()
 
 next_appt <- get_rio_contacts() %>% 
     tidy_rio_contacts() %>% 
-    filter(team_code == "team_code") %>%  
+    filter(team_code %in% teams) %>%
     filter(contacts_contact_datetime > "2022-10-01") %>% 
     arrange(contacts_contact_datetime) %>%
     select(client_id, referral_id, contacts_contact_datetime, appt_type_desc)
 
 current_pats <- get_rio_referrals() %>% 
     tidy_rio_referrals() %>% 
-    filter(team_code == "team_code") %>% 
+    filter(team_code %in% teams) %>%
     filter(is.na(referrals_discharge_datetime)) %>% 
     filter(is.na(referrals_firstappt_datetime)) %>% 
     left_join(next_appt) %>% 
@@ -188,9 +188,11 @@ current_pats <- get_rio_referrals() %>%
                                 waiting_time > 28 ~ 1,
                                 TRUE ~ 0),
            risk_sum = imd_risk + ethnicity_risk + age_risk + wait_risk,
-        referrals_referral_datetime = as.Date(referrals_referral_datetime)) 
+        referrals_referral_datetime = as.Date(lubridate::floor_date(referrals_referral_datetime, unit = "month")))
 
 current_pats_risk <- current_pats %>% 
+    mutate(patient_name = "PATIENT NAME",
+           client_id = "PATIENT IDENTIFIER") |> 
     select(RiONumber = client_id,
            Patient = patient_name,
            ReferralDate = referrals_referral_datetime,
@@ -219,7 +221,7 @@ datatable(current_pats_risk, filter = 'top', extensions = 'Buttons',  options = 
 ```{r}
 current_pats_caseload <- get_rio_referrals() %>% 
     tidy_rio_referrals() %>% 
-    filter(team_code == "team_code") %>% 
+    filter(team_code %in% teams) %>%
     filter(is.na(referrals_discharge_datetime)) %>% 
     filter(!is.na(referrals_firstappt_datetime)) %>% 
     left_join(next_appt) %>% 
@@ -232,11 +234,13 @@ current_pats_caseload <- get_rio_referrals() %>%
     collect() %>% 
     distinct(client_id, referrals_referral_datetime, .keep_all = TRUE) %>% 
     mutate(patient_name = paste(forename, surname, sep = " "),
-        referral_age  = eeptools::age_calc(as.Date(date_of_birth), as.Date(referrals_referral_datetime), units = "years", precise = FALSE))
+        referral_age  = eeptools::age_calc(as.Date(date_of_birth), as.Date(referrals_referral_datetime), units = "years", precise = FALSE),
+        referrals_referral_datetime = as.Date(lubridate::floor_date(referrals_referral_datetime, unit = "month")),
+        next_booked_appt = as.Date(lubridate::floor_date(next_booked_appt, unit = "month")))
 
 next_appt <- get_rio_contacts() %>% 
     tidy_rio_contacts() %>% 
-    filter(team_code == "team_code") %>%  
+    filter(team_code %in% teams) %>% 
     filter(contacts_contact_datetime > lubridate::today()) %>% 
     filter(contact_status == "Unoutcomed") %>% 
     arrange(contacts_contact_datetime) %>%
@@ -246,20 +250,21 @@ next_appt <- get_rio_contacts() %>%
     distinct(client_id, .keep_all = TRUE) %>% 
     select(client_id, hcp_code, contacts_contact_datetime)
 
-hcp_names <- readxl::read_excel("lmht_job_matching.xlsx", sheet = 3)
+# hcp_names <- readxl::read_excel("lmht_job_matching.xlsx", sheet = 3)
 
 current_pats_na_ethnic <- current_pats_caseload %>% 
     left_join(next_appt) %>% 
-    left_join(hcp_names) %>% 
-    mutate(referrals_referral_datetime = as.Date(referrals_referral_datetime),
-           referrals_firstappt_datetime = as.Date(referrals_firstappt_datetime),
-           hcp_name = case_when(is.na(hcp_name) ~ hcp_code,
-                                TRUE ~ hcp_name),
-           contacts_contact_datetime = as.Date(contacts_contact_datetime)) %>% 
+    # left_join(hcp_names) %>% 
+    mutate(referrals_referral_datetime = as.Date(lubridate::floor_date(referrals_referral_datetime, unit = "week")),
+           referrals_firstappt_datetime = as.Date(lubridate::floor_date(referrals_firstappt_datetime, unit = "week")),
+           hcp_name = "HCP NAME",
+           patient_name = "PATIENT NAME",
+           client_id = "PATIENT IDENTIFIER",
+           contacts_contact_datetime = as.Date(lubridate::floor_date(contacts_contact_datetime, unit = "week"))) %>% 
     filter(str_detect(ethnicity_category, "^Not")) %>% 
     select(RiONumber = client_id,
            Patient = patient_name,
-           NextHCP = hcp_name,
+           # NextHCP = hcp_name,
            NextContact = contacts_contact_datetime,
            FirstAppt = referrals_firstappt_datetime,
            Ethnicity = ethnicity_category)
