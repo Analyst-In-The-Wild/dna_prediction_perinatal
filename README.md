@@ -4,6 +4,8 @@ Code being shared for the NHS-R Conference
 
 There are 4 code files and 2 output files
 
+There is also the presentation
+
 ### grouping_variable.R
 Using nottshcData, a package created for our team to extract simply from the SQL warehouse. Variables from the different tables we want to gorup to produce a more manageable list with enough occurances of each to be able to do stats on. 
 
@@ -27,3 +29,5 @@ The final tab shows some basic demographic information for the team caseload par
 ### dna_monitoring_perinatal.html
 This file is the output of the previous Rmd and has certain elements redacts to prevemt unnecessarily disclosure but aesthetically contains everything that the clinical team see and this refreshes on the server for them daily
 
+### nhs_r_presentation.ppt
+The presentation slides from NHS-R Community Conference 2023 (Wednesday 11th October)
